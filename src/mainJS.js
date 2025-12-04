@@ -121,16 +121,23 @@ async function navigate(path) {
 
     const loadScript = (src) => {
         return new Promise((resolve, reject) => {
-            let script = document.querySelector(`script[src="${src}"]`);
-            if (!script) {
-                script = document.createElement("script");
-                script.src = src;
-                script.onload = resolve;
-                script.onerror = reject;
-                document.body.appendChild(script);
-            } else {
-                resolve(); // Script already loaded
+            // Add cache busting parameter
+            const cacheBuster = `?v=${Date.now()}`;
+            const srcWithCache = src + cacheBuster;
+            
+            // Check if script with base src exists (without cache buster)
+            let script = document.querySelector(`script[src^="${src}"]`);
+            if (script) {
+                // Remove old script to force reload
+                script.remove();
             }
+            
+            // Create new script element
+            script = document.createElement("script");
+            script.src = srcWithCache;
+            script.onload = resolve;
+            script.onerror = reject;
+            document.body.appendChild(script);
         });
     };
 
