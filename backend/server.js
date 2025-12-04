@@ -116,6 +116,35 @@ app.get("/profile", requiresAuth(), (req, res) => {
 });
 
 // User data route - shows Redis user data (for debugging)
+// User data API endpoint - returns JSON
+app.get("/api/user-data", requiresAuth(), async (req, res) => {
+  try {
+    const auth0User = req.oidc.user;
+    let userData = {};
+    
+    if (redis && redis.isOpen) {
+        const userId = await redis.get(`email:${auth0User.email}`);
+        if (userId) {
+             userData = await redis.hGetAll(`user:${userId}`);
+        }
+    }
+    
+    // Return JSON response with user info
+    res.json({
+      user: {
+        id: userData.id || auth0User.sub,
+        name: userData.name || auth0User.name,
+        email: userData.email || auth0User.email,
+        picture: userData.picture || auth0User.picture
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching user data:', error);
+    res.status(500).json({ error: 'Error fetching user data' });
+  }
+});
+
+// User data HTML endpoint - for debugging (browser viewing)
 app.get("/user-data", requiresAuth(), async (req, res) => {
   try {
     const auth0User = req.oidc.user;
@@ -208,6 +237,31 @@ io.on('connection', (socket) => {
     if (boardId) {
         // Broadcast to everyone in the room EXCEPT the sender
         socket.to(boardId).emit('board:update', data);
+    }
+  });
+
+  // Handle chat messages
+  socket.on('chat:message', (data) => {
+    const { roomId, message, sender, timestamp } = data;
+    console.log(`Chat message in room ${roomId} from ${sender}: ${message}`);
+    
+    if (roomId && message) {
+      // Broadcast message to everyone in the room INCLUDING sender
+      io.to(roomId).emit('chat:message', {
+        message,
+        sender,
+        timestamp: timestamp || new Date().toISOString(),
+        socketId: socket.id
+      });
+    }
+  });
+
+  // Handle user typing indicator
+  socket.on('chat:typing', (data) => {
+    const { roomId, userName, isTyping } = data;
+    if (roomId) {
+      // Broadcast typing status to others in room (not sender)
+      socket.to(roomId).emit('chat:typing', { userName, isTyping });
     }
   });
 

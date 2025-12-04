@@ -5,6 +5,9 @@ window.initChat = function() {
     let isOpen = false; // Initial state: Collapsed
     let messages = [];
     let showAccount = false;
+    let currentRoom = 'general'; // Default room
+    let currentUser = 'User'; // Will be set from Auth0
+    let typingTimeout = null;
     
     // --- DOM Elements ---
     const sidebarContainer = document.getElementById('sidebar-container');
@@ -19,30 +22,64 @@ window.initChat = function() {
     const userIcon = document.getElementById('user-icon');
     const accountOverlay = document.getElementById('account-overlay');
 
+    // Verify critical elements exist
+    if (!messagesContainer) {
+        console.error('❌ messages-container not found in DOM!');
+        return;
+    }
+    if (!messageInput || !sendButton) {
+        console.error('❌ Chat input elements not found in DOM!');
+        return;
+    }
+    
+    console.log('✅ All chat DOM elements found');
+
     // --- Configuration ---
-    const defaultMessages = [
-        { text: "Hey, did you finish the wireframe?", sender: "A", fromSelf: false },
-        { text: "Almost! I’m updating the sticky note layout.", sender: "L", fromSelf: true },
-        { text: "Nice — send it over when ready.", sender: "S", fromSelf: false },
-    ];
+    
+    // Get socket instance (should be initialized in mainJS.js)
+    const socket = window.socket;
+    if (!socket) {
+        console.error('❌ Socket.IO not initialized!');
+        return;
+    }
+
+    console.log('✅ Socket.IO found, ID:', socket.id, 'Connected:', socket.connected);
+    
+    // Log connection events for debugging
+    socket.on('connect', () => {
+        console.log('✅ Socket connected:', socket.id);
+    });
+    
+    socket.on('disconnect', () => {
+        console.log('❌ Socket disconnected');
+    });
+
+    // Cleanup any existing chat listeners first
+    socket.off('chat:message');
+    socket.off('chat:typing');
+
+    // Fetch current user info from Auth0
+    fetch('/api/user-data')
+        .then(res => {
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return res.json();
+        })
+        .then(data => {
+            if (data.user) {
+                currentUser = data.user.name || data.user.email || 'User';
+                console.log('✅ Chat user:', currentUser);
+            }
+        })
+        .catch(err => {
+            console.error('❌ Error fetching user data:', err);
+            currentUser = 'User'; // Fallback
+        });
+
+    // Join the chat room
+    socket.emit('join', currentRoom);
+    console.log(`✅ Joined chat room: ${currentRoom}`);
     
     // --- Core Functions ---
-
-    const loadMessages = () => {
-        const saved = localStorage.getItem("chatMessages");
-        try {
-            messages = saved ? JSON.parse(saved) : defaultMessages;
-            // Ensure loaded messages are NOT marked as animated (they are old)
-            messages.forEach(m => m.animated = false);
-        } catch (e) {
-            console.error("Error parsing messages from localStorage:", e);
-            messages = defaultMessages;
-        }
-    };
-
-    const saveMessages = () => {
-        localStorage.setItem("chatMessages", JSON.stringify(messages));
-    };
 
     /**
      * Renders all messages to the DOM and scrolls to the bottom.
@@ -71,7 +108,7 @@ window.initChat = function() {
             bubble.style.overflowWrap = 'break-word';
             bubble.textContent = msg.text;
             
-            // Sender Initials
+            // Sender Name/Initials
             const senderInitials = document.createElement('div');
             senderInitials.className = `rounded-full flex items-center justify-center text-black text-xs px-2 py-0.5 font-semibold bg-gray-200 ${senderClasses}`;
             senderInitials.textContent = msg.sender;
@@ -79,19 +116,42 @@ window.initChat = function() {
             messageDiv.appendChild(bubble);
             messageDiv.appendChild(senderInitials);
             messagesContainer.appendChild(messageDiv);
-            
-            // After rendering, clear animation flag for next time
-            if (msg.animated) {
-                msg.animated = false;
-            }
         });
-        
-        // Save the state where animated is false so refreshes don't re-animate
-        saveMessages();
 
         // Scroll to the bottom of the chat
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
     };
+
+    // Listen for incoming chat messages from Socket.IO
+    socket.on('chat:message', (data) => {
+        console.log('📨 Received chat message:', data);
+        const { message, sender, socketId } = data;
+        const fromSelf = socketId === socket.id;
+        
+        console.log(`📨 Message from ${sender}, fromSelf: ${fromSelf}, mySocketId: ${socket.id}, theirSocketId: ${socketId}`);
+        
+        messages.push({
+            text: message,
+            sender: sender || 'Anonymous',
+            fromSelf: fromSelf,
+            animated: true
+        });
+        
+        console.log(`📨 Total messages in array: ${messages.length}`);
+        renderMessages();
+        
+        // Clear animation flag after render
+        setTimeout(() => {
+            messages.forEach(m => m.animated = false);
+        }, 500);
+    });
+
+    // Listen for typing indicators
+    socket.on('chat:typing', (data) => {
+        const { userName, isTyping } = data;
+        // TODO: Display "userName is typing..." indicator
+        console.log(`${userName} is ${isTyping ? 'typing' : 'stopped typing'}`);
+    });
 
     const onToggle = () => {
         isOpen = !isOpen;
@@ -155,12 +215,39 @@ window.initChat = function() {
         const text = messageInput.value.trim();
         if (!text) return;
 
-        // Mark new message as animated
-        const newMessageObj = { text: text, sender: "L", fromSelf: true, animated: true };
-        messages.push(newMessageObj);
+        console.log(`Sending message to room ${currentRoom}: "${text}" from ${currentUser}`);
         
-        messageInput.value = ""; // Clear input
-        renderMessages(); // This will render with animation, then clear flags and save
+        // Send message via Socket.IO
+        socket.emit('chat:message', {
+            roomId: currentRoom,
+            message: text,
+            sender: currentUser,
+            timestamp: new Date().toISOString()
+        });
+        
+        messageInput.value = ''; // Clear input
+        
+        // Stop typing indicator
+        if (typingTimeout) {
+            clearTimeout(typingTimeout);
+            typingTimeout = null;
+        }
+        socket.emit('chat:typing', { roomId: currentRoom, userName: currentUser, isTyping: false });
+    };
+
+    const handleTyping = () => {
+        // Emit typing indicator
+        socket.emit('chat:typing', { roomId: currentRoom, userName: currentUser, isTyping: true });
+        
+        // Clear previous timeout
+        if (typingTimeout) {
+            clearTimeout(typingTimeout);
+        }
+        
+        // Set timeout to stop typing indicator after 2 seconds
+        typingTimeout = setTimeout(() => {
+            socket.emit('chat:typing', { roomId: currentRoom, userName: currentUser, isTyping: false });
+        }, 2000);
     };
 
     const toggleAccount = (show) => {
@@ -172,10 +259,7 @@ window.initChat = function() {
 
     // --- Event Listeners & Initialization ---
     
-    // 1. Load data
-    loadMessages();
-
-    // 2. Apply initial transition styles via JS
+    // 1. Apply initial transition styles via JS
     if (sidebarExpanded) {
         sidebarExpanded.style.transition = 'opacity 0.3s ease-in-out';
         sidebarExpanded.style.opacity = '0';
@@ -184,10 +268,10 @@ window.initChat = function() {
         toggleCollapsedBtn.style.transition = 'opacity 0.3s ease-in-out';
     }
     
-    // 3. Initial render for all dynamic elements
+    // 2. Initial render for all dynamic elements
     renderSidebar();
 
-    // 4. Attach Sidebar listeners
+    // 3. Attach Sidebar listeners
     if (toggleCollapsedBtn) toggleCollapsedBtn.addEventListener('click', onToggle);
     if (toggleExpandedBtn) toggleExpandedBtn.addEventListener('click', onToggle);
     
@@ -195,15 +279,17 @@ window.initChat = function() {
     if (messageInput) {
         messageInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
+                e.preventDefault();
                 handleSend();
             }
         });
+        messageInput.addEventListener('input', handleTyping);
     }
 
-    // 5. Attach Utility Bar listeners (Account Only)
+    // 4. Attach Utility Bar listeners (Account Only)
     if (userIcon) userIcon.addEventListener('click', () => toggleAccount(true));
 
-    // 6. Add click listeners to close overlays (backdrop clicks)
+    // 5. Add click listeners to close overlays (backdrop clicks)
     if (accountOverlay) {
         accountOverlay.addEventListener('click', (e) => {
             if (e.target === accountOverlay) toggleAccount(false);
@@ -212,6 +298,16 @@ window.initChat = function() {
     
     // Expose toggle functions globally for use in modal buttons (HTML onclicks)
     window.toggleAccount = toggleAccount;
+
+    // Cleanup function for when navigating away from board
+    window.cleanupChat = function() {
+        // Remove Socket.IO listeners to prevent duplicates
+        if (socket) {
+            socket.off('chat:message');
+            socket.off('chat:typing');
+        }
+        console.log('Chat cleanup: Removed Socket.IO listeners');
+    };
 };
 
 // Auto-init for direct page loads or when script is loaded

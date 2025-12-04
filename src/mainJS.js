@@ -211,17 +211,42 @@ async function initApp() {
     console.log("Initializing app...");
 
     // --- Inject Socket.IO Client ---
-    if (!document.querySelector('script[src="/socket.io/socket.io.js"]')) {
-        const socketScript = document.createElement('script');
-        socketScript.src = '/socket.io/socket.io.js';
-
-        // ⬇️ ADD THIS
-        socketScript.onload = () => {
-            console.log("Socket.IO client loaded.");
-            window.socket = io();  // ⬅️ THIS FIXES YOUR ERROR
-        };
-
-        document.head.appendChild(socketScript);
+    if (!window.socket) {
+        await new Promise((resolve) => {
+            if (document.querySelector('script[src="/socket.io/socket.io.js"]')) {
+                // Script already exists, just initialize socket
+                if (typeof io !== 'undefined') {
+                    window.socket = io();
+                    console.log("Socket.IO initialized:", window.socket.id);
+                    resolve();
+                } else {
+                    // Wait for io to be available
+                    const checkIo = setInterval(() => {
+                        if (typeof io !== 'undefined') {
+                            clearInterval(checkIo);
+                            window.socket = io();
+                            console.log("Socket.IO initialized:", window.socket.id);
+                            resolve();
+                        }
+                    }, 100);
+                }
+            } else {
+                // Create and load the script
+                const socketScript = document.createElement('script');
+                socketScript.src = '/socket.io/socket.io.js';
+                socketScript.onload = () => {
+                    console.log("Socket.IO client loaded.");
+                    window.socket = io();
+                    console.log("Socket.IO initialized:", window.socket.id);
+                    resolve();
+                };
+                socketScript.onerror = () => {
+                    console.error("Failed to load Socket.IO client");
+                    resolve();
+                };
+                document.head.appendChild(socketScript);
+            }
+        });
     }
 
     // --- Load the Navbar First ---
